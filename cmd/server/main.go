@@ -27,7 +27,21 @@ func main() {
 	defer conn.Close()
 	fmt.Println("Successfully connected to RabbitMQ")
 
-	// Create a channel
+	// NEW: Declare + bind the durable game_logs queue to the peril_topic exchange
+	gameLogCh, _, err := pubsub.DeclareAndBind(
+		conn,
+		routing.ExchangePerilTopic, // exchange: peril_topic
+		routing.GameLogSlug,        // queue name: game_logs
+		routing.GameLogSlug+".*",   // routing key: game_logs.*
+		pubsub.SimpleQueueDurable,  // durable queue
+	)
+	if err != nil {
+		fmt.Println("Failed to declare/bind game_logs queue:", err)
+		os.Exit(1)
+	}
+	defer gameLogCh.Close()
+
+	// Create a channel (used for publishing pause/resume)
 	ch, err := conn.Channel()
 	if err != nil {
 		fmt.Println("Failed to open RabbitMQ channel:", err)

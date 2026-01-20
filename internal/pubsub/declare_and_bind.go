@@ -27,13 +27,18 @@ func DeclareAndBind(
 	autoDelete := queueType == SimpleQueueTransient
 	exclusive := queueType == SimpleQueueTransient
 
+	// NEW: dead-letter exchange args, ch 5 p3
+	args := amqp.Table{
+		"x-dead-letter-exchange": "peril_dlx",
+	}
+
 	q, err := ch.QueueDeclare(
 		queueName,
 		durable,    // durable
 		autoDelete, // autoDelete
 		exclusive,  // exclusive
 		false,      // noWait
-		nil,        // args
+		args,       // args (DLX configured here)
 	)
 	if err != nil {
 		ch.Close()
@@ -41,11 +46,11 @@ func DeclareAndBind(
 	}
 
 	if err := ch.QueueBind(
-		q.Name,   // queue name
-		key,      // routing key
-		exchange, // exchange
-		false,    // noWait
-		nil,      // args
+		q.Name,
+		key,
+		exchange,
+		false,
+		nil,
 	); err != nil {
 		ch.Close()
 		return nil, amqp.Queue{}, err

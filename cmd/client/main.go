@@ -24,6 +24,14 @@ func main() {
 	defer conn.Close()
 	fmt.Println("Successfully connected to RabbitMQ")
 
+	// Create a channel for publishing (PublishJSON needs *amqp.Channel)
+	pubCh, err := conn.Channel()
+	if err != nil {
+		fmt.Println("Failed to open RabbitMQ channel:", err)
+		os.Exit(1)
+	}
+	defer pubCh.Close()
+
 	// Prompt for username
 	username, err := gamelogic.ClientWelcome()
 	if err != nil {
@@ -31,23 +39,41 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Declare + bind a transient pause queue: pause.<username>
-	queueName := routing.PauseKey + "." + username
-	ch, _, err := pubsub.DeclareAndBind(
-		conn,
-		routing.ExchangePerilDirect,
-		queueName,
-		routing.PauseKey,
-		pubsub.SimpleQueueTransient,
-	)
-	if err != nil {
-		fmt.Println("Failed to declare/bind queue:", err)
-		os.Exit(1)
-	}
-	defer ch.Close()
-
 	// Create a new game state
 	gamestate := gamelogic.NewGameState(username)
+
+	// ---- Subscribe to pause/resume messages (direct exchange) ----
+	pauseQueueName := routing.PauseKey + "." + username
+	if err := pubsub.SubscribeJSON(
+		conn,
+		routing.ExchangePerilDirect,
+		pauseQueueName,
+		routing.PauseKey,
+		pubsub.SimpleQueueTransient,
+		handlerPause(gamestate),
+	); err != nil {
+		fmt.Println("Failed to subscribe to pause messages:", err)
+		os.Exit(1)
+	}
+
+	// ---- NEW: Subscribe to army move messages (topic exchange) ----
+	// Binding key: army_moves.*
+	// Queue name:  army_moves.<username>
+	armyMovesSlug := "army_moves"
+	moveQueueName := armyMovesSlug + "." + username
+	moveBindingKey := armyMovesSlug + ".*"
+
+	if err := pubsub.SubscribeJSON[gamelogic.ArmyMove](
+		conn,
+		routing.ExchangePerilTopic,
+		moveQueueName,
+		moveBindingKey,
+		pubsub.SimpleQueueTransient,
+		handlerMove(gamestate),
+	); err != nil {
+		fmt.Println("Failed to subscribe to move messages:", err)
+		os.Exit(1)
+	}
 
 	// Print available client commands
 	gamelogic.PrintClientHelp()
@@ -56,7 +82,6 @@ func main() {
 	for {
 		words := gamelogic.GetInput()
 		if words == nil {
-			// Input failed (EOF / stdin closed)
 			gamelogic.PrintQuit()
 			return
 		}
@@ -66,22 +91,31 @@ func main() {
 
 		switch words[0] {
 		case "spawn":
-			// spawn <location> <unit_type>
-			// e.g. spawn europe infantry
 			if err := gamestate.CommandSpawn(words); err != nil {
 				fmt.Println("Error:", err)
 			}
-			// CommandSpawn should print the new unit ID itself (per assignment expectation)
 
 		case "move":
-			// move <destination> <unit_id>
-			// e.g. move europe 1
-			_, err := gamestate.CommandMove(words)
+			// CommandMove updates local state and returns the ArmyMove event payload
+			mv, err := gamestate.CommandMove(words)
 			if err != nil {
 				fmt.Println("Error:", err)
 				continue
 			}
-			fmt.Println("Move successful!")
+
+			// Publish move to army_moves.<username> on the topic exchange
+			moveRoutingKey := armyMovesSlug + "." + username
+			if err := pubsub.PublishJSON(
+				pubCh,
+				routing.ExchangePerilTopic,
+				moveRoutingKey,
+				mv,
+			); err != nil {
+				fmt.Println("Failed to publish move:", err)
+				continue
+			}
+
+			fmt.Println("Move published successfully!")
 
 		case "status":
 			gamestate.CommandStatus()
