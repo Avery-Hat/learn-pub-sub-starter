@@ -27,19 +27,26 @@ func main() {
 	defer conn.Close()
 	fmt.Println("Successfully connected to RabbitMQ")
 
-	// NEW: Declare + bind the durable game_logs queue to the peril_topic exchange
-	gameLogCh, _, err := pubsub.DeclareAndBind(
+	// Ch6 Serialization p3 Consume Logs: Subscribe to gob-encoded game logs and write them to disk
+	logKey := routing.GameLogSlug + ".*" // capture logs from all clients
+	if err := pubsub.SubscribeGob[routing.GameLog](
 		conn,
 		routing.ExchangePerilTopic, // exchange: peril_topic
 		routing.GameLogSlug,        // queue name: game_logs
-		routing.GameLogSlug+".*",   // routing key: game_logs.*
+		logKey,                     // binding key: game_logs.*
 		pubsub.SimpleQueueDurable,  // durable queue
-	)
-	if err != nil {
-		fmt.Println("Failed to declare/bind game_logs queue:", err)
+		func(gl routing.GameLog) pubsub.AckType {
+			defer fmt.Print("> ")
+			if err := gamelogic.WriteLog(gl); err != nil {
+				fmt.Println("Failed to write log:", err)
+				return pubsub.NackRequeue
+			}
+			return pubsub.Ack
+		},
+	); err != nil {
+		fmt.Println("Failed to subscribe to game logs:", err)
 		os.Exit(1)
 	}
-	defer gameLogCh.Close()
 
 	// Create a channel (used for publishing pause/resume)
 	ch, err := conn.Channel()

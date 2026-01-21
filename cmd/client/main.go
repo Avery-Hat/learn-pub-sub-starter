@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
@@ -50,15 +52,13 @@ func main() {
 		pauseQueueName,
 		routing.PauseKey,
 		pubsub.SimpleQueueTransient,
-		handlerPause(gamestate),
+		handlerPause(gamestate), // must return pubsub.AckType now
 	); err != nil {
 		fmt.Println("Failed to subscribe to pause messages:", err)
 		os.Exit(1)
 	}
 
-	// ---- NEW: Subscribe to army move messages (topic exchange) ----
-	// Binding key: army_moves.*
-	// Queue name:  army_moves.<username>
+	// ---- Subscribe to army move messages (topic exchange) ----
 	armyMovesSlug := "army_moves"
 	moveQueueName := armyMovesSlug + "." + username
 	moveBindingKey := armyMovesSlug + ".*"
@@ -69,9 +69,24 @@ func main() {
 		moveQueueName,
 		moveBindingKey,
 		pubsub.SimpleQueueTransient,
-		handlerMove(gamestate),
+		handlerMove(gamestate, pubCh), // <-- CHANGED: pass pubCh, returns AckType
 	); err != nil {
 		fmt.Println("Failed to subscribe to move messages:", err)
+		os.Exit(1)
+	}
+
+	// ---- NEW: Subscribe to war recognitions (topic exchange) ----
+	// durable shared queue named "war"
+	warBindingKey := routing.WarRecognitionsPrefix + ".*"
+	if err := pubsub.SubscribeJSON[gamelogic.RecognitionOfWar](
+		conn,
+		routing.ExchangePerilTopic,
+		"war",
+		warBindingKey,
+		pubsub.SimpleQueueDurable,
+		handlerWar(gamestate, pubCh),
+	); err != nil {
+		fmt.Println("Failed to subscribe to war messages:", err)
 		os.Exit(1)
 	}
 
@@ -124,7 +139,35 @@ func main() {
 			gamelogic.PrintClientHelp()
 
 		case "spam":
-			fmt.Println("Spamming not allowed yet!")
+			if len(words) < 2 {
+				fmt.Println("usage: spam <n>")
+				break
+			}
+
+			n, err := strconv.Atoi(words[1])
+			if err != nil || n < 1 {
+				fmt.Println("usage: spam <n> (n must be a positive integer)")
+				break
+			}
+
+			key := routing.GameLogSlug + "." + username
+
+			for i := 0; i < n; i++ {
+				msg := gamelogic.GetMaliciousLog()
+
+				gl := routing.GameLog{
+					CurrentTime: time.Now(),
+					Message:     msg,
+					Username:    username,
+				}
+
+				if err := pubsub.PublishGob(pubCh, routing.ExchangePerilTopic, key, gl); err != nil {
+					fmt.Println("Failed to publish spam log:", err)
+					break
+				}
+			}
+
+			fmt.Printf("Published %d log(s)\n", n)
 
 		case "quit":
 			gamelogic.PrintQuit()

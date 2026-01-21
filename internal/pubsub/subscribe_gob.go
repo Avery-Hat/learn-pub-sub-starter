@@ -1,21 +1,21 @@
 package pubsub
 
 import (
-	"encoding/json"
+	"bytes"
+	"encoding/gob"
 	"fmt"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-func SubscribeJSON[T any](
+func SubscribeGob[T any](
 	conn *amqp.Connection,
 	exchange,
 	queueName,
 	key string,
 	queueType SimpleQueueType,
-	handler func(T) AckType, // <-- changed
+	handler func(T) AckType,
 ) error {
-	// Ensure queue exists and is bound
 	ch, _, err := DeclareAndBind(conn, exchange, queueName, key, queueType)
 	if err != nil {
 		return err
@@ -43,9 +43,18 @@ func SubscribeJSON[T any](
 
 	go func() {
 		for msg := range deliveries {
+			// Optional but helpful: verify content type
+			if msg.ContentType != "" && msg.ContentType != "application/gob" {
+				fmt.Println("[pubsub] Wrong content type -> NackDiscard:", msg.ContentType)
+				_ = msg.Nack(false, false)
+				continue
+			}
+
 			var val T
-			if err := json.Unmarshal(msg.Body, &val); err != nil {
-				fmt.Println("[pubsub] Unmarshal failed -> Ack (discarding bad message):", err)
+			dec := gob.NewDecoder(bytes.NewReader(msg.Body))
+			if err := dec.Decode(&val); err != nil {
+				// Poison message: discard so it doesn't loop forever
+				fmt.Println("[pubsub] Gob decode failed -> Ack (discarding bad message):", err)
 				_ = msg.Ack(false)
 				continue
 			}
@@ -63,7 +72,6 @@ func SubscribeJSON[T any](
 				fmt.Println("[pubsub] NackDiscard")
 				_ = msg.Nack(false, false)
 			default:
-				// Safe default for unexpected return values: discard
 				fmt.Println("[pubsub] Unknown AckType -> NackDiscard")
 				_ = msg.Nack(false, false)
 			}
